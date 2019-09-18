@@ -134,6 +134,9 @@ class BertModel(object):
                input_ids,
                input_mask=None,
                token_type_ids=None,
+               query_mask=None,
+               bridge_mask=None,
+               passage_mask=None,
                use_one_hot_embeddings=False,
                scope=None):
     """Constructor for BertModel.
@@ -230,6 +233,76 @@ class BertModel(object):
             config.hidden_size,
             activation=tf.tanh,
             kernel_initializer=create_initializer(config.initializer_range))
+
+    with tf.variable_scope("co_match"):
+      # B L(Q) H
+      query_sequence = tf.multiply(self.sequence_output, tf.cast(tf.expand_dims(query_mask, -1), tf.float32))
+      # B L(P1) H
+      bridge_sequence = tf.multiply(self.sequence_output, tf.cast(tf.expand_dims(bridge_mask, -1), tf.float32))
+      # B L(P2) H
+      passage_sequence = tf.multiply(self.sequence_output, tf.cast(tf.expand_dims(passage_mask, -1), tf.float32))
+
+      # B L(Q) H
+      co_match1 = tf.layers.dense(
+        query_sequence,
+        config.hidden_size,
+        activation=None,
+        name="co_match1",
+        kernel_initializer=create_initializer(config.initializer_range))
+      # B L(Q) H
+      co_match1 = tf.multiply(co_match1, tf.cast(tf.expand_dims(query_mask, -1), tf.float32))
+      # B L(P2) L(Q)
+      co_match1 = tf.matmul(passage_sequence, co_match1, transpose_b=True)
+      # B L(P2) L(Q)
+      attention1 = tf.nn.softmax(co_match1)
+      # B L(P2) L(Q)
+      attention1 = tf.nn.dropout(attention1, 1.0 - config.attention_probs_dropout_prob)
+      # B L(P2) H
+      hidden1 = tf.matmul(attention1, query_sequence)
+
+      # B L(Q) H
+      co_match2 = tf.layers.dense(
+        bridge_sequence,
+        config.hidden_size,
+        activation=None,
+        name="co_match2",
+        kernel_initializer=create_initializer(config.initializer_range))
+      # B L(Q) H
+      co_match2 = tf.multiply(co_match2, tf.cast(tf.expand_dims(bridge_mask, -1), tf.float32))
+      # B L(P2) L(P1)
+      co_match2 = tf.matmul(passage_sequence, co_match2, transpose_b=True)
+      # B L(P2) L(P1)
+      attention2 = tf.nn.softmax(co_match2)
+      # B L(P2) L(P1)
+      attention2 = tf.nn.dropout(attention2, 1.0 - config.attention_probs_dropout_prob)
+      # B L(P2) H
+      hidden2 = tf.matmul(attention2, bridge_sequence)
+
+      # B L(P2) 2H
+      hidden = tf.concat([hidden1, hidden2], axis=-1)
+      # B L(P2) 2H
+      hidden = tf.multiply(hidden, tf.cast(tf.expand_dims(passage_mask, -1), tf.float32))
+      # B L(P2) 2H
+      self.bilstm = tf.keras.layers.Bidirectional(tf.keras.layers.CuDNNLSTM(config.hidden_size, return_sequences=True))(hidden)
+      self.bilstm = tf.multiply(self.bilstm, tf.cast(tf.expand_dims(passage_mask, -1), tf.float32))
+      # B L(P2) 2H
+      # self.bilstm = tf.nn.dropout(self.bilstm, 1.0 - config.attention_probs_dropout_prob)
+      # B L H
+      # self.attention = attention_layer(
+      #         from_tensor=self.bilstm,
+      #         to_tensor=self.bilstm,
+      #         attention_mask=attention_mask,
+      #         num_attention_heads=config.num_attention_heads,
+      #         size_per_head=int(config.hidden_size / config.num_attention_heads),
+      #         attention_probs_dropout_prob=config.attention_probs_dropout_prob,
+      #         initializer_range=config.initializer_range,
+      #         do_return_2d_tensor=False,
+      #         batch_size=batch_size,
+      #         from_seq_length=seq_length,
+      #         to_seq_length=seq_length)
+
+  def get_comatching_output(self):
+    return self.bilstm
 
   def get_pooled_output(self):
     return self.pooled_output

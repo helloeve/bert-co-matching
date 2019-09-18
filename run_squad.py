@@ -98,7 +98,7 @@ flags.DEFINE_float(
     "Proportion of training to perform linear learning rate warmup for. "
     "E.g., 0.1 = 10% of training.")
 
-flags.DEFINE_integer("save_checkpoints_steps", 1000,
+flags.DEFINE_integer("save_checkpoints_steps", 1000000,
                      "How often to save the model checkpoint.")
 
 flags.DEFINE_integer("iterations_per_loop", 1000,
@@ -207,6 +207,9 @@ class InputFeatures(object):
                input_ids,
                input_mask,
                segment_ids,
+               query_mask,
+               bridge_mask,
+               passage_mask,
                start_position=None,
                end_position=None,
                is_impossible=None):
@@ -218,6 +221,9 @@ class InputFeatures(object):
     self.token_is_max_context = token_is_max_context
     self.input_ids = input_ids
     self.input_mask = input_mask
+    self.query_mask = query_mask
+    self.bridge_mask = bridge_mask
+    self.passage_mask = passage_mask
     self.segment_ids = segment_ids
     self.start_position = start_position
     self.end_position = end_position
@@ -389,7 +395,7 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length,
       segment_ids.append(1)
 
       input_ids = tokenizer.convert_tokens_to_ids(tokens)
-
+      query_mask, bridge_mask, passage_mask = tokenizer.compute_mask(tokens)
       # The mask has 1 for real tokens and 0 for padding tokens. Only real
       # tokens are attended to.
       input_mask = [1] * len(input_ids)
@@ -399,10 +405,16 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length,
         input_ids.append(0)
         input_mask.append(0)
         segment_ids.append(0)
+        query_mask.append(0)
+        bridge_mask.append(0)
+        passage_mask.append(0)
 
       assert len(input_ids) == max_seq_length
       assert len(input_mask) == max_seq_length
       assert len(segment_ids) == max_seq_length
+      assert len(query_mask) == max_seq_length
+      assert len(bridge_mask) == max_seq_length
+      assert len(passage_mask) == max_seq_length
 
       start_position = None
       end_position = None
@@ -444,6 +456,12 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length,
             "input_mask: %s" % " ".join([str(x) for x in input_mask]))
         tf.logging.info(
             "segment_ids: %s" % " ".join([str(x) for x in segment_ids]))
+        tf.logging.info(
+            "query_mask: %s" % " ".join([str(x) for x in query_mask]))
+        tf.logging.info(
+            "bridge_mask: %s" % " ".join([str(x) for x in bridge_mask]))
+        tf.logging.info(
+            "passage_mask: %s" % " ".join([str(x) for x in passage_mask]))
         if is_training and example.is_impossible:
           tf.logging.info("impossible example")
         if is_training and not example.is_impossible:
@@ -463,6 +481,9 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length,
           input_ids=input_ids,
           input_mask=input_mask,
           segment_ids=segment_ids,
+          query_mask=query_mask,
+          bridge_mask=bridge_mask,
+          passage_mask=passage_mask,
           start_position=start_position,
           end_position=end_position,
           is_impossible=example.is_impossible)
@@ -548,6 +569,7 @@ def _check_is_max_context(doc_spans, cur_span_index, position):
 
 
 def create_model(bert_config, is_training, input_ids, input_mask, segment_ids,
+                 query_mask, bridge_mask, passage_mask,
                  use_one_hot_embeddings):
   """Creates a classification model."""
   model = modeling.BertModel(
@@ -556,6 +578,9 @@ def create_model(bert_config, is_training, input_ids, input_mask, segment_ids,
       input_ids=input_ids,
       input_mask=input_mask,
       token_type_ids=segment_ids,
+      query_mask=query_mask,
+      bridge_mask=bridge_mask,
+      passage_mask=passage_mask,
       use_one_hot_embeddings=use_one_hot_embeddings)
 
   final_hidden = model.get_sequence_output()
@@ -603,6 +628,9 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate,
     input_ids = features["input_ids"]
     input_mask = features["input_mask"]
     segment_ids = features["segment_ids"]
+    query_mask = features["query_mask"]
+    bridge_mask = features["bridge_mask"]
+    passage_mask = features["passage_mask"]
 
     is_training = (mode == tf.estimator.ModeKeys.TRAIN)
 
@@ -612,6 +640,9 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate,
         input_ids=input_ids,
         input_mask=input_mask,
         segment_ids=segment_ids,
+        query_mask=query_mask,
+        bridge_mask=bridge_mask,
+        passage_mask=passage_mask,
         use_one_hot_embeddings=use_one_hot_embeddings)
 
     tvars = tf.trainable_variables()
@@ -692,6 +723,9 @@ def input_fn_builder(input_file, seq_length, is_training, drop_remainder):
       "input_ids": tf.FixedLenFeature([seq_length], tf.int64),
       "input_mask": tf.FixedLenFeature([seq_length], tf.int64),
       "segment_ids": tf.FixedLenFeature([seq_length], tf.int64),
+      "query_mask": tf.FixedLenFeature([seq_length], tf.int64),
+      "bridge_mask": tf.FixedLenFeature([seq_length], tf.int64),
+      "passage_mask": tf.FixedLenFeature([seq_length], tf.int64),
   }
 
   if is_training:
@@ -824,7 +858,7 @@ def write_predictions(all_examples, all_features, all_results, n_best_size,
         reverse=True)
 
     _NbestPrediction = collections.namedtuple(  # pylint: disable=invalid-name
-        "NbestPrediction", ["text", "start_logit", "end_logit"])
+        "NbestPrediction", ["text", "start_logit", "end_logit", "start_index", "end_index"])
 
     seen_predictions = {}
     nbest = []
@@ -861,7 +895,9 @@ def write_predictions(all_examples, all_features, all_results, n_best_size,
           _NbestPrediction(
               text=final_text,
               start_logit=pred.start_logit,
-              end_logit=pred.end_logit))
+              end_logit=pred.end_logit,
+              start_index=pred.start_index,
+              end_index=pred.end_index))
 
     # if we didn't inlude the empty option in the n-best, inlcude it
     if FLAGS.version_2_with_negative:
@@ -895,12 +931,14 @@ def write_predictions(all_examples, all_features, all_results, n_best_size,
       output["probability"] = probs[i]
       output["start_logit"] = entry.start_logit
       output["end_logit"] = entry.end_logit
+      output["start_index"] = entry.start_index
+      output["end_index"] = entry.end_index
       nbest_json.append(output)
 
     assert len(nbest_json) >= 1
 
     if not FLAGS.version_2_with_negative:
-      all_predictions[example.qas_id] = nbest_json[0]["text"]
+      all_predictions[example.qas_id] = nbest_json[0]
     else:
       # predict "" iff the null score - the score of best non-null > threshold
       score_diff = score_null - best_non_null_entry.start_logit - (
@@ -1078,6 +1116,9 @@ class FeatureWriter(object):
     features["input_ids"] = create_int_feature(feature.input_ids)
     features["input_mask"] = create_int_feature(feature.input_mask)
     features["segment_ids"] = create_int_feature(feature.segment_ids)
+    features["query_mask"] = create_int_feature(feature.query_mask)
+    features["bridge_mask"] = create_int_feature(feature.bridge_mask)
+    features["passage_mask"] = create_int_feature(feature.passage_mask)
 
     if self.is_training:
       features["start_positions"] = create_int_feature([feature.start_position])

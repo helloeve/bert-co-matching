@@ -166,10 +166,17 @@ class FullTokenizer(object):
     self.inv_vocab = {v: k for k, v in self.vocab.items()}
     self.basic_tokenizer = BasicTokenizer(do_lower_case=do_lower_case)
     self.wordpiece_tokenizer = WordpieceTokenizer(vocab=self.vocab)
+    import re
+    self.unused_pattern = re.compile('\[unused[0-9]+\]')
 
   def tokenize(self, text):
+    if self.unused_pattern.match(text):
+      return [text]
     split_tokens = []
     for token in self.basic_tokenizer.tokenize(text):
+      if self.unused_pattern.match(token):
+        split_tokens.append(token)
+        continue
       for sub_token in self.wordpiece_tokenizer.tokenize(token):
         split_tokens.append(sub_token)
 
@@ -181,6 +188,16 @@ class FullTokenizer(object):
   def convert_ids_to_tokens(self, ids):
     return convert_by_vocab(self.inv_vocab, ids)
 
+  def compute_mask(self, items):
+    try:
+      mask1 = [1] * items.index('[SEP]') + [0] * (len(items) - items.index('[SEP]'))
+      mask2 = [0] * (items.index('[SEP]') + 1) + [1] * (items.index('[unused0]') - items.index('[SEP]') - 1) + [0] * (len(items) - items.index('[unused0]'))
+      mask3 = [0] * (items.index('[unused0]') + 1) + [1] * (len(items) - items.index('[unused0]') - 2) + [0]
+    except:
+      mask1 = [1] * items.index('[SEP]') + [0] * (len(items) - items.index('[SEP]'))
+      mask2 = [0] * len(items)
+      mask3 = [0] * (items.index('[SEP]') + 1) + [1] * (len(items) - items.index('[SEP]') - 2) + [0]
+    return mask1, mask2, mask3
 
 class BasicTokenizer(object):
   """Runs basic tokenization (punctuation splitting, lower casing, etc.)."""
