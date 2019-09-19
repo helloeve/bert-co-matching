@@ -27,8 +27,8 @@ python run_squad.py \
   --do_train=False \
   --do_predict=True \
   --do_lower_case=True \
-  --train_file $SQUAD_DIR/hotpot_train_v1.1.support_only.unbiased.json \
-  --predict_file $SQUAD_DIR/dev_hotpot_open_domain_paragraphs_new_squad.json \
+  --train_file $SQUAD_DIR/hotpot_train_v1.1.ordered_support_only.json \
+  --predict_file $SQUAD_DIR/hotpot_dev_distractor_v1.ordered_support_only.json \
   --vocab_file $BERT_BASE_DIR/vocab.txt \
   --bert_config_file $BERT_BASE_DIR/bert_config.json \
   --init_checkpoint $BERT_BASE_DIR/bert_model.ckpt \
